@@ -184,25 +184,220 @@ function WeaponSnatchInventory.RemoveHandgun(source, weapon)
 	return false
 end
 
+local function cloneWeapon(weapon)
+	local copy = {}
+	for key, value in pairs(weapon) do
+		copy[key] = value
+	end
+	return copy
+end
+
+local function matchWeaponMeta(item, weapon)
+	if type(item) ~= 'table' or not item.name then
+		return false
+	end
+	if string.lower(item.name) ~= string.lower(weapon.name) then
+		return false
+	end
+
+	local itemInfo = item.info or item.metadata
+	local weaponInfo = weapon.info or weapon.metadata
+	if type(weaponInfo) ~= 'table' then
+		return true
+	end
+	if type(itemInfo) ~= 'table' then
+		return false
+	end
+
+	if weaponInfo.serie and itemInfo.serie then
+		return itemInfo.serie == weaponInfo.serie
+	end
+	if weaponInfo.serial and itemInfo.serial then
+		return itemInfo.serial == weaponInfo.serial
+	end
+
+	return true
+end
+
+local function findQsWeaponItem(source, weapon)
+	local inventories = {
+		function()
+			return exports['qs-inventory']:GetInventory(source)
+		end,
+		function()
+			return exports['qs-inventory']:GetInventory(source, source)
+		end,
+	}
+
+	for i = 1, #inventories do
+		local ok, inv = pcall(inventories[i])
+		if ok and type(inv) == 'table' then
+			local fallback = nil
+			for slot, item in pairs(inv) do
+				if matchWeaponMeta(item, weapon) then
+					item.slot = item.slot or tonumber(slot) or slot
+					if (item.info and item.info.serie) or (item.info and item.info.serial) then
+						return item
+					end
+					fallback = fallback or item
+				end
+			end
+			if fallback then
+				return fallback
+			end
+		end
+	end
+
+	local okItem, item = pcall(function()
+		return exports['qs-inventory']:GetItemByName(source, weapon.name)
+	end)
+	if okItem and type(item) == 'table' and item.name then
+		return item
+	end
+
+	local okItems, items = pcall(function()
+		return exports['qs-inventory']:GetItemsByName(source, weapon.name)
+	end)
+	if okItems and type(items) == 'table' then
+		for j = 1, #items do
+			if matchWeaponMeta(items[j], weapon) then
+				return items[j]
+			end
+		end
+		if items[1] then
+			return items[1]
+		end
+	end
+
+	return nil
+end
+
+local function findOxWeaponItem(source, weapon)
+	local metadata = weapon.metadata or weapon.info
+	local ok, items = pcall(function()
+		return exports.ox_inventory:Search(source, 'slots', weapon.name)
+	end)
+	if not ok or type(items) ~= 'table' then
+		return nil
+	end
+
+	local fallback = nil
+	for _, item in pairs(items) do
+		if type(item) == 'table' and item.slot then
+			local itemMeta = item.metadata or item.info
+			if type(metadata) == 'table' and type(itemMeta) == 'table' then
+				if metadata.serial and itemMeta.serial and metadata.serial == itemMeta.serial then
+					return item
+				end
+				if metadata.serie and itemMeta.serie and metadata.serie == itemMeta.serie then
+					return item
+				end
+			end
+			fallback = fallback or item
+		end
+	end
+
+	return fallback
+end
+
+local function findQbWeaponItem(source, weapon)
+	local qb = WeaponSnatchFramework.GetQBCore()
+	local player = qb and qb.Functions.GetPlayer(source)
+	if not player then
+		return nil
+	end
+
+	local items = player.PlayerData and player.PlayerData.items
+	if type(items) ~= 'table' then
+		return nil
+	end
+
+	local fallback = nil
+	for slot, item in pairs(items) do
+		if matchWeaponMeta(item, weapon) then
+			item.slot = item.slot or tonumber(slot) or slot
+			local info = item.info or item.metadata
+			if info and (info.serie or info.serial) then
+				return item
+			end
+			fallback = fallback or item
+		end
+	end
+
+	return fallback
+end
+
+--- Returns given weapon table (with recipient slot) on success, otherwise false.
 function WeaponSnatchInventory.GiveHandgun(source, weapon)
 	if type(weapon) ~= 'table' or not weapon.name then
 		return false
 	end
 
 	local adapter = weapon.adapter or WeaponSnatchFramework.GetInventory()
+	local given = cloneWeapon(weapon)
 
 	if adapter == 'qs' then
 		local ok, added = pcall(function()
 			return exports['qs-inventory']:AddItem(source, weapon.name, 1, nil, weapon.info, nil, weapon.created, nil, true)
 		end)
-		return ok and added ~= false
+		if not ok or added == false then
+			return false
+		end
+
+		local item = findQsWeaponItem(source, weapon)
+		if item then
+			given.slot = item.slot
+			given.info = item.info or given.info or {}
+			given.amount = item.amount or 1
+			given.created = item.created or given.created
+		else
+			-- Never equip using the victim's old slot.
+			given.slot = nil
+			given.info = given.info or {}
+		end
+		given.adapter = 'qs'
+		return given
 	end
 
 	if adapter == 'ox' then
-		local ok, added = pcall(function()
+		local ok, success, response = pcall(function()
 			return exports.ox_inventory:AddItem(source, weapon.name, 1, weapon.metadata or weapon.info)
 		end)
-		return ok and added ~= false
+		if not ok or success == false or success == nil then
+			return false
+		end
+
+		-- ox_inventory: true + slot/item, or sometimes slot/item alone.
+		if type(response) == 'number' then
+			given.slot = response
+		elseif type(response) == 'table' then
+			if response.slot then
+				given.slot = response.slot
+				given.metadata = response.metadata or given.metadata or given.info
+			elseif response[1] and response[1].slot then
+				given.slot = response[1].slot
+				given.metadata = response[1].metadata or given.metadata or given.info
+			end
+		elseif type(success) == 'number' then
+			given.slot = success
+		elseif type(success) == 'table' then
+			given.slot = success.slot or (success[1] and success[1].slot) or given.slot
+			given.metadata = success.metadata
+				or (success[1] and success[1].metadata)
+				or given.metadata
+				or given.info
+		end
+
+		if not given.slot then
+			local item = findOxWeaponItem(source, weapon)
+			if item then
+				given.slot = item.slot
+				given.metadata = item.metadata or given.metadata or given.info
+			end
+		end
+
+		given.adapter = 'ox'
+		return given
 	end
 
 	if adapter == 'qb' then
@@ -212,15 +407,32 @@ function WeaponSnatchInventory.GiveHandgun(source, weapon)
 			return false
 		end
 		local info = weapon.info or weapon.metadata
-		if weapon.slot and GetResourceState('qb-inventory') == 'started' then
-			local ok, added = pcall(function()
-				return exports['qb-inventory']:AddItem(source, weapon.name, 1, false, info, weapon.slot)
+		local added = false
+
+		-- Always add into a free slot; victim slot is invalid on recipient.
+		if GetResourceState('qb-inventory') == 'started' then
+			local ok, result = pcall(function()
+				return exports['qb-inventory']:AddItem(source, weapon.name, 1, false, info)
 			end)
-			if ok and added ~= false then
-				return true
-			end
+			added = ok and result ~= false
 		end
-		return player.Functions.AddItem(weapon.name, 1, false, info) == true
+		if not added then
+			added = player.Functions.AddItem(weapon.name, 1, false, info) == true
+		end
+		if not added then
+			return false
+		end
+
+		local item = findQbWeaponItem(source, weapon)
+		if item then
+			given.slot = item.slot
+			given.info = item.info or info or {}
+		else
+			given.slot = nil
+			given.info = info or {}
+		end
+		given.adapter = 'qb'
+		return given
 	end
 
 	local esx = WeaponSnatchFramework.GetESX()
@@ -231,7 +443,8 @@ function WeaponSnatchInventory.GiveHandgun(source, weapon)
 
 	if adapter == 'esx_loadout' or weapon.ammo ~= nil then
 		xPlayer.addWeapon(weapon.name, weapon.ammo or 0)
-		return true
+		given.adapter = 'esx_loadout'
+		return given
 	end
 
 	if xPlayer.canCarryItem and not xPlayer.canCarryItem(weapon.name, 1) then
@@ -239,5 +452,6 @@ function WeaponSnatchInventory.GiveHandgun(source, weapon)
 	end
 
 	xPlayer.addInventoryItem(weapon.name, 1, weapon.info)
-	return true
+	given.adapter = 'esx_item'
+	return given
 end

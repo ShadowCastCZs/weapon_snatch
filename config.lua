@@ -1,6 +1,6 @@
 Config = {}
 
-Config.Locale = 'cs'
+Config.Locale = 'en'
 
 --- auto | esx | qb
 Config.Framework = 'auto'

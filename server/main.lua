@@ -201,7 +201,8 @@ local function attemptTake(source, targetId, targetAiming)
 		return false
 	end
 
-	if not WeaponSnatchInventory.GiveHandgun(source, weapon) then
+	local given = WeaponSnatchInventory.GiveHandgun(source, weapon)
+	if not given then
 		WeaponSnatchInventory.GiveHandgun(targetId, weapon)
 		NotifyPlayer(source, 'take_weapon_inventory_full')
 		return false
@@ -215,7 +216,8 @@ local function attemptTake(source, targetId, targetAiming)
 	end
 
 	if equipOnSuccess ~= false then
-		TriggerClientEvent('weapon_snatch:equip', source, weapon)
+		-- Use recipient weapon data (new slot). Victim slot breaks inventory equip.
+		TriggerClientEvent('weapon_snatch:equip', source, given)
 	end
 
 	NotifyPlayer(source, 'take_weapon_success')

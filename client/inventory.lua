@@ -25,6 +25,54 @@ local function weaponNameFromHash(weaponHash)
 	return nil
 end
 
+local function normalizeWeaponData(weaponData)
+	if type(weaponData) ~= 'table' or not weaponData.name then
+		return nil
+	end
+
+	local data = {}
+	for key, value in pairs(weaponData) do
+		data[key] = value
+	end
+
+	data.name = string.lower(data.name)
+	data.info = data.info or data.metadata or {}
+	if type(data.info) ~= 'table' then
+		data.info = {}
+	end
+	if data.info.ammo == nil then
+		data.info.ammo = data.ammo or 0
+	end
+	data.hash = data.hash or joaat(data.name)
+	return data
+end
+
+local function applyAttachments(ped, hash, info)
+	if type(info) ~= 'table' or type(info.attachments) ~= 'table' then
+		return
+	end
+
+	for _, attachment in pairs(info.attachments) do
+		if attachment.tint then
+			SetPedWeaponTintIndex(ped, hash, attachment.tint)
+		elseif attachment.component then
+			GiveWeaponComponentToPed(ped, hash, joaat(attachment.component))
+		end
+	end
+end
+
+local function forceEquipPedWeapon(weaponData)
+	local ped = PlayerPedId()
+	local hash = weaponData.hash or joaat(weaponData.name)
+	local ammo = tonumber(weaponData.info and weaponData.info.ammo) or tonumber(weaponData.ammo) or 0
+
+	GiveWeaponToPed(ped, hash, ammo, false, true)
+	SetPedAmmo(ped, hash, ammo)
+	SetCurrentPedWeapon(ped, hash, true)
+	applyAttachments(ped, hash, weaponData.info)
+	return GetSelectedPedWeapon(ped) == hash
+end
+
 function WeaponSnatchInventory.GetHandWeaponData()
 	local ped = PlayerPedId()
 	local weaponHash = GetSelectedPedWeapon(ped)
@@ -101,43 +149,123 @@ function WeaponSnatchInventory.Disarm()
 	RemoveAllPedWeapons(ped, true)
 end
 
-function WeaponSnatchInventory.Equip(weaponData)
-	if type(weaponData) ~= 'table' or not weaponData.name then
-		return
-	end
-
-	local kind = WeaponSnatchFramework.GetInventory()
+local function equipQs(weaponData)
 	local prefix = inventoryPrefix()
 
-	if kind == 'qs' and GetResourceState('qs-inventory') == 'started' then
-		Wait(120)
+	-- Holster first so qs UseWeapon does not toggle-off the same weapon name.
+	TriggerEvent('weapons:client:DrawWeapon', nil)
+	TriggerEvent('weapons:client:SetCurrentWeapon', nil, false)
+	SetCurrentPedWeapon(PlayerPedId(), `WEAPON_UNARMED`, true)
+
+	Wait(200)
+
+	-- Prefer inventory UseWeapon with recipient slot when available.
+	if weaponData.slot then
 		TriggerEvent(prefix .. ':client:UseWeapon', weaponData, true)
-		return
+		Wait(100)
+		if GetSelectedPedWeapon(PlayerPedId()) == (weaponData.hash or joaat(weaponData.name)) then
+			return true
+		end
 	end
 
-	if kind == 'ox' and GetResourceState('ox_inventory') == 'started' then
-		if weaponData.slot then
+	-- Direct equip path (same as qs UseWeapon else-branch), avoids toggle + slot issues.
+	TriggerEvent('weapons:client:DrawWeapon', weaponData.name)
+	TriggerEvent('weapons:client:SetCurrentWeapon', weaponData, true)
+	return forceEquipPedWeapon(weaponData)
+end
+
+local function equipOx(weaponData)
+	if weaponData.slot then
+		local ok = pcall(function()
 			exports.ox_inventory:useSlot(weaponData.slot)
+		end)
+		if ok then
+			Wait(150)
+			if GetSelectedPedWeapon(PlayerPedId()) == (weaponData.hash or joaat(weaponData.name)) then
+				return true
+			end
 		end
+	end
+
+	-- Fallback: find slot by name on client inventory, then use it.
+	local okSearch, items = pcall(function()
+		return exports.ox_inventory:Search('slots', weaponData.name)
+	end)
+	if okSearch and type(items) == 'table' then
+		for _, item in pairs(items) do
+			if type(item) == 'table' and item.slot then
+				local matched = true
+				local meta = item.metadata or item.info
+				local want = weaponData.metadata or weaponData.info
+				if type(want) == 'table' and type(meta) == 'table' then
+					if want.serial and meta.serial and want.serial ~= meta.serial then
+						matched = false
+					elseif want.serie and meta.serie and want.serie ~= meta.serie then
+						matched = false
+					end
+				end
+				if matched then
+					pcall(function()
+						exports.ox_inventory:useSlot(item.slot)
+					end)
+					Wait(150)
+					if GetSelectedPedWeapon(PlayerPedId()) == (weaponData.hash or joaat(weaponData.name)) then
+						return true
+					end
+				end
+			end
+		end
+	end
+
+	return forceEquipPedWeapon(weaponData)
+end
+
+local function equipQb(weaponData)
+	if weaponData.slot and GetResourceState('qb-inventory') == 'started' then
+		TriggerServerEvent('qb-inventory:server:useItemSlot', weaponData.slot)
+		Wait(150)
+		if GetSelectedPedWeapon(PlayerPedId()) == (weaponData.hash or joaat(weaponData.name)) then
+			return true
+		end
+	end
+	return forceEquipPedWeapon(weaponData)
+end
+
+function WeaponSnatchInventory.Equip(weaponData)
+	weaponData = normalizeWeaponData(weaponData)
+	if not weaponData then
 		return
 	end
 
-	if kind == 'qb' then
-		local ped = PlayerPedId()
-		local hash = weaponData.hash or joaat(weaponData.name)
-		GiveWeaponToPed(ped, hash, weaponData.info and weaponData.info.ammo or 0, false, true)
-		SetCurrentPedWeapon(ped, hash, true)
-		if weaponData.slot and GetResourceState('qb-inventory') == 'started' then
-			TriggerServerEvent('qb-inventory:server:useItemSlot', weaponData.slot)
-		end
-		return
-	end
+	CreateThread(function()
+		local kind = WeaponSnatchFramework.GetInventory()
 
-	local ped = PlayerPedId()
-	local hash = weaponData.hash or joaat(weaponData.name)
-	local ammo = weaponData.ammo or (weaponData.info and weaponData.info.ammo) or 0
-	GiveWeaponToPed(ped, hash, ammo, false, true)
-	SetCurrentPedWeapon(ped, hash, true)
+		-- Let inventory sync the newly added item first.
+		Wait(250)
+
+		for _ = 1, 4 do
+			local equipped = false
+
+			if kind == 'qs' and GetResourceState('qs-inventory') == 'started' then
+				equipped = equipQs(weaponData)
+			elseif kind == 'ox' and GetResourceState('ox_inventory') == 'started' then
+				equipped = equipOx(weaponData)
+			elseif kind == 'qb' then
+				equipped = equipQb(weaponData)
+			else
+				equipped = forceEquipPedWeapon(weaponData)
+			end
+
+			if equipped then
+				return
+			end
+
+			Wait(200)
+		end
+
+		-- Last resort natives if inventory adapters failed to select the weapon.
+		forceEquipPedWeapon(weaponData)
+	end)
 end
 
 if lib and lib.callback then
