@@ -35,8 +35,7 @@ Optional:
 ## Installation
 
 1. Copy `weapon_snatch` into `resources/`
-2. Rename `fxmanifest.lua.example` → `fxmanifest.lua`
-3. Add to `server.cfg`:
+2. Add to `server.cfg`:
 
 ```cfg
 ensure ox_lib
